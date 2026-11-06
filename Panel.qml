@@ -1,4 +1,5 @@
 import QtQuick
+import QtMultimedia
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -78,6 +79,58 @@ Panel {
   readonly property int maxFps: Number(setting("maxFps", 60))
   readonly property string keyboardMode: String(setting("keyboardMode", "sdk"))
   readonly property bool screenOff: setting("screenOff", false) === true
+
+  // The webcam preview: the live camera feed, rendered in place at the top of
+  // the panel. Qt Multimedia talks to the loopback node directly, so the
+  // picture is exactly what a call sees. Because of exclusive_caps the capture
+  // side of the node only exists while something is writing to it, so the
+  // section appears precisely when there is a camera stream to watch.
+  readonly property bool webcamPreview: setting("webcamPreview", true) === true
+  readonly property bool webcamWanted: webcamPreview && ready && loopback && camera !== "off"
+
+  // One MediaDevices for the whole panel: the preview needs the matched
+  // CameraDevice, and so does anything that asks which formats it offers.
+  MediaDevices { id: mediaDevices }
+
+  // Qt names the capture device by its /dev path, which is the same string
+  // the camera controls and the status blob speak.
+  readonly property var webcamDevice: {
+    var inputs = mediaDevices.videoInputs
+    for (var i = 0; i < inputs.length; i++)
+      if (String(inputs[i].id) === root.videoDevice) return inputs[i]
+    return null
+  }
+
+  // The loopback offers the format its writer chose; take the largest, which
+  // for a camera stream is the whole negotiation in one value.
+  function pickWebcamFormat(formats) {
+    var best = null
+    for (var i = 0; i < (formats ? formats.length : 0); i++) {
+      if (best === null) { best = formats[i]; continue }
+      var candidate = formats[i].resolution
+      var current = best.resolution
+      if (candidate.width * candidate.height > current.width * current.height)
+        best = formats[i]
+      else if (candidate.width * candidate.height === current.width * current.height
+               && formats[i].maxFrameRate > best.maxFrameRate)
+        best = formats[i]
+    }
+    return best
+  }
+
+  readonly property var webcamFormat:
+    pickWebcamFormat(webcamDevice ? webcamDevice.videoFormats : [])
+  readonly property real webcamAspect: {
+    var format = webcamFormat
+    if (!format || !format.resolution || format.resolution.height <= 0) return 16 / 9
+    return format.resolution.width / format.resolution.height
+  }
+  // An exclusive consumer — a call that quarrels over the node — reads as a
+  // Camera error, and the last frame would say nothing about why.
+  readonly property string webcamError:
+    webcamLoader.item && webcamLoader.item.cameraError !== ""
+      ? webcamLoader.item.cameraError
+      : ""
 
   // The live preview: a still frame of the phone's screen, refreshed while the
   // panel is open. Each grab writes to the other of two files so the image
@@ -361,7 +414,9 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(360) + body.previewSpace)
-    contentHeight: panel.fittedContentHeight(column.implicitHeight)
+    contentHeight: panel.fittedContentHeight(webcamPane.height
+                      + (webcamPane.visible ? Style.space(14) : 0)
+                      + column.implicitHeight)
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -369,11 +424,100 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
+      // The webcam preview floats above the controls, full width, its
+      // height derived from the stream's own aspect ratio. Qt Multimedia
+      // renders it in place — no floating window, no subprocess. Hidden
+      // when no camera is streaming, never an empty slot.
+      Rectangle {
+        id: webcamPane
+        visible: root.webcamWanted && root.webcamDevice !== null
+        width: parent.width
+        height: visible ? Math.round(width / root.webcamAspect) : 0
+        radius: Style.cornerRadius
+        color: Qt.rgba(0, 0, 0, 0.5)
+        border.width: 1
+        border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+        clip: true
+
+        // The session lives and dies with the pane: closing the stream, or
+        // losing it, tears the Camera down and releases the node for the
+        // next consumer.
+        Loader {
+          id: webcamLoader
+          anchors.fill: parent
+          active: webcamPane.visible
+          sourceComponent: webcamComponent
+        }
+
+        Component {
+          id: webcamComponent
+
+          Item {
+            id: live
+            property string cameraError: ""
+
+            // Qt drops cameraFormat when the device changes and again when
+            // the camera activates, so the negotiated writer format has to
+            // be written back after the event loop, every time.
+            function applyFormat() {
+              Qt.callLater(function() {
+                if (!live || !webcam) return
+                var want = root.webcamFormat
+                if (!want) return
+                if (!webcam.cameraFormat
+                    || webcam.cameraFormat.resolution.width !== want.resolution.width
+                    || webcam.cameraFormat.resolution.height !== want.resolution.height)
+                  webcam.cameraFormat = want
+              })
+            }
+            Component.onCompleted: live.applyFormat()
+
+            Camera {
+              id: webcam
+              cameraDevice: root.webcamDevice
+              active: root.webcamWanted
+              onActiveChanged: live.applyFormat()
+              onCameraDeviceChanged: live.applyFormat()
+              onErrorOccurred: function(error, errorString) { live.cameraError = errorString }
+            }
+
+            CaptureSession { camera: webcam; videoOutput: view }
+            VideoOutput {
+              id: view
+              anchors.fill: parent
+              fillMode: VideoOutput.PreserveAspectFit
+            }
+          }
+        }
+
+        // The node is there but the capture could not open it — some other
+        // consumer holding it exclusively, mostly. Say so rather than
+        // showing a black rectangle.
+        Rectangle {
+          anchors.fill: parent
+          visible: webcamLoader.item !== null && webcamLoader.item.cameraError !== ""
+          color: Qt.rgba(0, 0, 0, 0.72)
+
+          Text {
+            anchors.centerIn: parent
+            width: parent.width - Style.space(40)
+            text: root.webcamError
+            textFormat: Text.PlainText
+            color: "white"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+          }
+        }
+      }
+
       Row {
         id: body
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.top: parent.top
+        anchors.top: webcamPane.bottom
+        anchors.topMargin: webcamPane.visible ? Style.space(14) : 0
         spacing: Style.space(14)
 
         // The preview is as tall as the controls beside it and as wide as that

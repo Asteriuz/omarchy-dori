@@ -139,6 +139,7 @@ Omarchy renders these from the manifest, under the plugin's own settings.
 | Setting | Default | What it is for |
 |---|---|---|
 | Live preview | on | the still of the phone's screen in the panel |
+| Webcam preview | on | the live camera feed rendered at the top of the panel whenever a camera is streaming; turning it off keeps the Controls only |
 | Webcam device | `/dev/video10` | must match the node `dori-setup` made; change both together with `dori-setup --device-number N` |
 | Back / front camera id | `0` / `1` | run `scrcpy --list-cameras` if the two buttons are swapped |
 | Back / front camera rotation | `0` / `0` | clockwise turn applied to the picture, for a sensor that arrives rotated; set `180` if it is upside down. Also on the panel, under CAMERA, where it follows the camera you have selected |
